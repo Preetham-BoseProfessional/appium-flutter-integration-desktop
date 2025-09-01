@@ -119,6 +119,7 @@ export async function fetchFlutterServerPort(
       portReleaseCallback,
       packageName,
       isIosSimulator,
+      isWindowsApp,
    }: {
       udid: string;
       systemPort?: number | null;
@@ -126,11 +127,27 @@ export async function fetchFlutterServerPort(
       portReleaseCallback?: PortReleaseCallback;
       packageName: string;
       isIosSimulator: boolean;
+      isWindowsApp:boolean
    },
 ): Promise<number | null> {
    const [startPort, endPort] = DEVICE_PORT_RANGE as [number, number];
    let devicePort = startPort;
    let forwardedPort = systemPort;
+
+   if (isWindowsApp) {
+      for (let port = startPort; port <= endPort; port++) {
+         try {
+            this.log.info(`Trying port ${port}`)
+            await waitForFlutterServer.bind(this)(port, packageName);
+            console.log(`Going to return the port ${port}`)
+            return port;
+         } catch (err) {
+            if (port === endPort) {
+            throw new Error(`No available port found between ${startPort} and ${endPort}`);
+            }
+         }
+      }
+   }
 
    if (isIosSimulator && (systemPort || devicePort)) {
       try {

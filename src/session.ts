@@ -4,6 +4,7 @@ import { PLATFORM } from './platform';
 import { startAndroidSession } from './android';
 import { startIOSSession } from './iOS';
 import type { DefaultCreateSessionResult } from '@appium/types';
+import {startWindowsSession} from './windows'
 
 export async function createSession(
    this: AppiumFlutterDriver,
@@ -27,6 +28,9 @@ export async function createSession(
                this.relaxedSecurityEnabled;
             this.proxydriver.denyInsecure = this.denyInsecure;
             this.proxydriver.allowInsecure = this.allowInsecure;
+            break;
+         case PLATFORM.WINDOWS:
+            this.proxydriver = await startWindowsSession.bind(this)(...args);
             break;
          default:
             this.log.errorWithException(

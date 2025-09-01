@@ -10,6 +10,7 @@ type FlutterDriverConstraints = typeof desiredCapConstraints;
 // @ts-ignore
 import { XCUITestDriver } from 'appium-xcuitest-driver';
 import { AndroidUiautomator2Driver } from 'appium-uiautomator2-driver';
+import { WindowsDriver } from 'appium-windows-driver';
 import { createSession as createSessionMixin } from './session';
 import {
    findElOrEls,
@@ -30,37 +31,18 @@ import {
    isFlutterDriverCommand,
    waitForFlutterServerToBeActive,
 } from './utils';
-import { logger, util } from 'appium/support';
+import { util } from 'appium/support';
 import { androidPortForward, androidRemovePortForward } from './android';
 import { iosPortForward, iosRemovePortForward } from './iOS';
 import type { PortForwardCallback, PortReleaseCallback } from './types';
 import _ from 'lodash';
 
-import type { RouteMatcher } from '@appium/types';
-
-const WEBVIEW_NO_PROXY = [
-   [`GET`, new RegExp(`^/session/[^/]+/appium`)],
-   [`GET`, new RegExp(`^/session/[^/]+/context`)],
-   [`GET`, new RegExp(`^/session/[^/]+/element/[^/]+/rect`)],
-   [`GET`, new RegExp(`^/session/[^/]+/log/types$`)],
-   [`GET`, new RegExp(`^/session/[^/]+/orientation`)],
-   [`POST`, new RegExp(`^/session/[^/]+/appium`)],
-   [`POST`, new RegExp(`^/session/[^/]+/context`)],
-   [`POST`, new RegExp(`^/session/[^/]+/log$`)],
-   [`POST`, new RegExp(`^/session/[^/]+/orientation`)],
-   [`POST`, new RegExp(`^/session/[^/]+/touch/multi/perform`)],
-   [`POST`, new RegExp(`^/session/[^/]+/touch/perform`)],
-] as import('@appium/types').RouteMatcher[];
-
 export class AppiumFlutterDriver extends BaseDriver<FlutterDriverConstraints> {
    // @ts-ignore
-   public proxydriver: XCUITestDriver | AndroidUiautomator2Driver;
+   public proxydriver: XCUITestDriver | Androidiautomator2Driver | WindowsDriver;
    public flutterPort: number | null | undefined;
    private internalCaps: DriverCaps<FlutterDriverConstraints> | undefined;
    public proxy: JWProxy | undefined;
-   private proxyWebViewActive: boolean = false;
-   public readonly NATIVE_CONTEXT_NAME: string = `NATIVE_APP`;
-   public currentContext: string = this.NATIVE_CONTEXT_NAME;
    click = click;
    findElOrEls = findElOrEls;
    getText = getText;
@@ -212,42 +194,10 @@ export class AppiumFlutterDriver extends BaseDriver<FlutterDriverConstraints> {
    }
 
    async executeCommand(command: any, ...args: any) {
-      if (
-         this.currentContext === this.NATIVE_CONTEXT_NAME &&
-         isFlutterDriverCommand(command)
-      ) {
+      if (isFlutterDriverCommand(command)) {
          return await super.executeCommand(command, ...args);
       }
-
-      this.handleContextSwitch(command, args);
-      logger.default.info(
-         `Executing the proxy command: ${command} with args: ${args}`,
-      );
       return await this.proxydriver.executeCommand(command as string, ...args);
-   }
-
-   private handleContextSwitch(command: string, args: any[]): void {
-      if (command === 'setContext') {
-         const isWebviewContext =
-            typeof args[0] === 'string' && args[0].includes('WEBVIEW');
-         if (typeof args[0] === 'string' && args[0].length > 0) {
-            this.currentContext = args[0];
-         } else {
-            logger.default.warn(
-               `Attempted to set context to invalid value: ${args[0]}. Keeping current context: ${this.currentContext}`,
-            );
-         }
-
-         if (isWebviewContext) {
-            this.proxyWebViewActive = true;
-         } else {
-            this.proxyWebViewActive = false;
-         }
-      }
-   }
-
-   public getProxyAvoidList(): RouteMatcher[] {
-      return WEBVIEW_NO_PROXY;
    }
 
    public async createSession(
@@ -275,9 +225,10 @@ export class AppiumFlutterDriver extends BaseDriver<FlutterDriverConstraints> {
          caps,
          ...JSON.parse(JSON.stringify(args)),
       );
-      const packageName =
-         this.proxydriver instanceof AndroidUiautomator2Driver
-            ? this.proxydriver.opts.appPackage!
+      const packageName = this.proxydriver instanceof AndroidUiautomator2Driver
+         ? this.proxydriver.opts.appPackage!
+         : this.proxydriver instanceof WindowsDriver
+            ?(this.proxydriver.opts as any).appName!
             : this.proxydriver.opts.bundleId!;
 
       const isIosSimulator =
@@ -314,18 +265,25 @@ export class AppiumFlutterDriver extends BaseDriver<FlutterDriverConstraints> {
          portcallbacks.portReleaseCallback = iosRemovePortForward;
       }
 
+      const isWindowsApp = this.proxydriver.opts.platformName?.toLowerCase() === 'windows' ? true : false;
+
       const systemPort =
          this.internalCaps.flutterSystemPort ||
          (isIosSimulator ? null : await getFreePort());
       const udid = this.proxydriver.opts.udid!;
 
-      this.flutterPort = await fetchFlutterServerPort.bind(this)({
-         udid,
-         packageName,
-         ...portcallbacks,
-         systemPort,
-         isIosSimulator,
-      });
+     this.flutterPort = this.proxydriver?.opts?.flutterServerPort 
+      ? this.proxydriver.opts.flutterServerPort 
+      : await fetchFlutterServerPort.bind(this)({
+            udid,
+            packageName,
+            ...portcallbacks,
+            systemPort,
+            isIosSimulator,
+            isWindowsApp
+         });
+
+      console.log(`The flutter port is ${this.flutterPort}`)
 
       if (!this.flutterPort) {
          throw new Error(
@@ -433,38 +391,24 @@ export class AppiumFlutterDriver extends BaseDriver<FlutterDriverConstraints> {
       return await this.proxydriver.execute(script, args);
    }
 
-   public proxyActive(): boolean {
-      // In WebView context, all request should go to each driver
-      // so that they can handle http request properly.
-      // On iOS, WebView context is handled by XCUITest driver while Android is by chromedriver.
-      // It means XCUITest driver should keep the XCUITest driver as a proxy,
-      // while UIAutomator2 driver should proxy to chromedriver instead of UIA2 proxy.
-      return (
-         this.proxyWebViewActive &&
-         !(this.proxydriver instanceof XCUITestDriver)
-      );
-   }
-
-   public canProxy(): boolean {
-      return this.proxyWebViewActive;
+   canProxy() {
+      return false;
    }
 
    async deleteSession() {
-      if (
-         this.proxydriver instanceof AndroidUiautomator2Driver &&
-         this.flutterPort
-      ) {
-         // @ts-ignore
-         await this.proxydriver.adb.removePortForward(this.flutterPort);
-      }
-      await this.proxydriver?.deleteSession();
-      await super.deleteSession();
+   if (
+      this.proxydriver instanceof AndroidUiautomator2Driver &&
+      this.flutterPort
+   ) {
+       // @ts-ignore
+      await this.proxydriver.adb.removePortForward(this.flutterPort);
+   }
+   await this.proxydriver?.deleteSession();
+   await super.deleteSession();
    }
 
    async mobilelaunchApp(appId: string, args: string[], environment: any) {
       let activateAppResponse;
-      this.currentContext = this.NATIVE_CONTEXT_NAME;
-      this.proxyWebViewActive = false;
       const launchArgs = _.assign(
          { arguments: [] as string[] },
          { arguments: args, environment },
